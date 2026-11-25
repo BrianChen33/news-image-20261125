@@ -1,8 +1,11 @@
 # news-image-20261125: sum up Wednesday 25 November 2026 in one image.
-# Pure Python 3 standard library. No network, no randomness, no time.
-# Draws a 1024x1024 PNG newspaper front page: masthead, world map with
-# 10 numbered markers, 8 drawn vector scenes, 34 region briefs, sources.
-# Writes $MAKEFUN_OUTPUT_DIR/entry.png (default /output/entry.png).
+# Pure Python 3 standard library plus Pillow when available (TrueType
+# headlines via DejaVu/Liberation; falls back to the built-in 5x7 pixel
+# font if Pillow or the fonts are missing). No network, no randomness,
+# no time. Draws a 1024x1024 PNG newspaper front page: masthead, world
+# map with 11 numbered markers, 8 drawn vector scenes, 34 region briefs,
+# a date key and sources. Writes $MAKEFUN_OUTPUT_DIR/entry.png
+# (default /output/entry.png).
 import os
 import struct
 import zlib
@@ -280,6 +283,112 @@ class Canvas:
         self.text(x + max(0, (w - tw) // 2), y, s, scale, c)
 
 
+# ---- TrueType text (DejaVu / Liberation) with pixel-font fallback ----
+# Headlines use real TrueType when Pillow and a font file are present;
+# otherwise every ttf_* helper degrades to the 5x7 pixel font above,
+# so the entry still renders in a minimal harness environment.
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    _PIL_OK = True
+except Exception:
+    _PIL_OK = False
+
+_TTF_PATHS = [
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    ("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+]
+_TTF_CACHE = {}
+
+
+def _ttf_font(bold, size):
+    if not _PIL_OK:
+        return None
+    key = (bold, size)
+    if key in _TTF_CACHE:
+        return _TTF_CACHE[key]
+    f = None
+    for bold_p, reg_p in _TTF_PATHS:
+        try:
+            f = ImageFont.truetype(bold_p if bold else reg_p, size)
+            break
+        except Exception:
+            continue
+    _TTF_CACHE[key] = f
+    return f
+
+
+# True when real TrueType rendering is available; draw code branches on
+# this for layout widths that differ between the two font engines.
+USE_TTF = _ttf_font(True, 16) is not None
+
+
+def _px_scale(size):
+    return max(1, round(size / 7))
+
+
+def ttf_width(s, size, bold=True):
+    f = _ttf_font(bold, size)
+    if f is None:
+        return text_width(s, _px_scale(size))
+    return int(f.getlength(s))
+
+
+def ttf_wrap(s, size, max_w, bold=True):
+    """Greedy word wrap by pixel width."""
+    f = _ttf_font(bold, size)
+    if f is None:
+        return wrap_text(s, max(1, max_w // (6 * _px_scale(size))))
+    lines, cur = [], ""
+    for word in s.split(" "):
+        trial = word if not cur else cur + " " + word
+        if f.getlength(trial) <= max_w:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def ttf_text(cv, x, y, s, size, color, bold=True):
+    """Draw text at (x, y) top-left; returns the width used."""
+    f = _ttf_font(bold, size)
+    if f is None:
+        return cv.text(x, y, s, _px_scale(size), color)
+    w = max(1, int(f.getlength(s)) + 2)
+    h = size + 6
+    img = Image.new("L", (w, h), 0)
+    d = ImageDraw.Draw(img)
+    d.text((1, 1), s, font=f, fill=255)
+    px = img.load()
+    for yy in range(h):
+        for xx in range(w):
+            g = px[xx, yy]
+            if g:
+                cx, cy = x + xx - 1, y + yy - 1
+                if 0 <= cx < cv.w and 0 <= cy < cv.h:
+                    i = (cy * cv.w + cx) * 3
+                    a = g / 255.0
+                    cv.px[i] = int(cv.px[i] * (1 - a) + color[0] * a)
+                    cv.px[i + 1] = int(cv.px[i + 1] * (1 - a) + color[1] * a)
+                    cv.px[i + 2] = int(cv.px[i + 2] * (1 - a) + color[2] * a)
+    return w - 2
+
+
+def ttf_text_center(cv, x, y, w, s, size, color, bold=True):
+    # shrink until the text fits the available width (matters for the
+    # pixel-font fallback, where a long footer line would run off the page)
+    sz = size
+    while sz > 8 and ttf_width(s, sz, bold) > w:
+        sz -= 2
+    tw = ttf_width(s, sz, bold)
+    ttf_text(cv, x + max(0, (w - tw) // 2), y, s, sz, color, bold)
+
+
 def write_png(path, canvas):
     raw = bytearray()
     stride = canvas.w * 3
@@ -324,8 +433,9 @@ EURASIA = [(-10, 36), (-9, 43), (-2, 48), (-5, 50), (0, 51), (5, 53),
            (130, 42), (127, 40), (122, 38), (120, 32), (118, 25), (110, 21),
            (108, 18), (105, 10), (100, 8), (98, 10), (95, 16), (92, 21),
            (88, 22), (85, 19), (80, 15), (77, 8), (75, 12), (72, 20),
-           (68, 23), (62, 25), (58, 26), (55, 26), (52, 28), (50, 30),
-           (48, 30), (44, 29), (40, 31), (36, 36), (30, 36), (27, 37),
+           (68, 23), (62, 25), (58, 26), (59, 22), (57, 19), (54, 17),
+           (50, 15), (46, 13.5), (43, 12.7), (42, 15), (40, 19), (38, 23),
+           (36, 27), (35, 29.5), (34.5, 31), (36, 33.5), (36, 36), (30, 36), (27, 37),
            (23, 36), (19, 40), (15, 44), (12, 44), (8, 44), (3, 43),
            (-2, 37), (-6, 36), (-9, 37)]
 AUSTRALIA = [(113, -22), (114, -30), (115, -35), (120, -34), (129, -32),
@@ -353,23 +463,28 @@ MEDITERRANEAN = [(-6, 36), (3, 37), (10, 37), (12, 40), (19, 40),
                  (11, 34), (8, 37), (3, 38), (-2, 36)]
 BLACK_SEA = [(28, 41), (33, 41), (38, 41), (41, 43), (39, 46), (33, 46),
              (28, 45)]
+RED_SEA = [(35, 29.5), (36, 27), (38, 23), (40, 19), (42, 15),
+           (43, 12.7), (41, 14), (39, 18), (37.5, 22), (36, 26),
+           (34.5, 29.5)]
 LAND_POLYS = [NORTH_AMERICA, SOUTH_AMERICA, AFRICA, EURASIA, AUSTRALIA,
               UK, JAPAN, NEW_ZEALAND, MADAGASCAR, NEW_GUINEA, BORNEO,
               SUMATRA, GREENLAND, ICELAND]
-SEA_CUTOUTS = [MEDITERRANEAN, BLACK_SEA]
+SEA_CUTOUTS = [MEDITERRANEAN, BLACK_SEA, RED_SEA]
 
-# Numbered story markers: (number, lon, lat, label)
+# Numbered story markers: (number, lon, lat, label). Every marker has a
+# matching headline carrying its number (illustrated, strip or brief).
 MARKERS = [
     (1, 98.5, 39.7, "JIUQUAN"),
     (2, 42.9, 14.8, "HODEIDAH"),
     (3, 121.5, 25.0, "TAIPEI"),
     (4, 160.0, -9.4, "HONIARA"),
-    (5, 54.4, 24.5, "ABU DHABI"),
-    (6, -74.0, 40.7, "NEW YORK"),
-    (7, 28.0, 38.5, "TURKIYE"),
+    (5, 149.1, -35.3, "CANBERRA"),
+    (6, 125.8, 39.0, "PYONGYANG"),
+    (7, 30.5, 39.8, "ESKISEHIR"),
     (8, -3.7, 40.4, "MADRID"),
     (9, -75.5, 10.4, "CARTAGENA"),
-    (10, 149.1, -35.3, "CANBERRA"),
+    (10, 6.1, 46.2, "GENEVA"),
+    (11, 13.2, 11.8, "BORNO"),
 ]
 
 
@@ -397,9 +512,9 @@ def draw_map(cv, x, y, w, h):
     cv.rect(x, y, w, h, INK)
     for num, lon, lat, _label in MARKERS:
         mx, my = proj(lon, lat)
-        cv.circle(mx, my, 8, RED, fill=True)
-        cv.circle(mx, my, 8, WHITE)
-        cv.text_center(mx - 8, my - 3, 16, str(num), 1, WHITE)
+        cv.circle(mx, my, 7, RED, fill=True)
+        cv.circle(mx, my, 7, WHITE)
+        cv.text_center(mx - 7, my - 3, 14, str(num), 1, WHITE)
 
 
 # ---- 8 drawn vector scenes (each draws inside a rect) ----
@@ -477,7 +592,12 @@ def scene_chart(cv, x, y, w, h):
     cv.line(x + 10, y + 8, x + w - 12, y + h - 10, RED, 3)
     cv.polygon([(x + w - 12, y + h - 10), (x + w - 26, y + h - 16),
                 (x + w - 22, y + h - 2)], RED)
-    cv.text(x + 10, y + 2, "-8.6%", 1, (255, 120, 100))
+    # the candles are illustrative, not real market data; label the move
+    lbl = "-8.6% TAIWAN"
+    ttf_text(cv, x + w - 10 - ttf_width(lbl, 12), y + 4, lbl, 12,
+             (255, 150, 130))
+    ttf_text(cv, x + 10, y + h - 14, "ILLUSTRATIVE", 9, (180, 190, 220),
+             bold=False)
 
 
 def scene_treaty(cv, x, y, w, h):
@@ -510,49 +630,35 @@ def scene_treaty(cv, x, y, w, h):
     cv.circle(x + w // 2 + 8, y + h - 44, 7, (150, 105, 75), fill=True)
 
 
-def scene_talks(cv, x, y, w, h):
-    cv.fill_rect(x, y, w, h, (228, 222, 210))
-    # round table
-    tr = min(26, h // 2 - 6)
-    cv.circle(x + w // 2, y + h // 2 + 4, tr, (120, 90, 60), fill=True)
-    cv.circle(x + w // 2, y + h // 2 + 4, tr, (90, 65, 40))
-    cv.circle(x + w // 2, y + h // 2 + 4, tr - 8, (150, 115, 75), fill=True)
-    # three flags behind the table: US, UA, RU (simplified stripes)
-    for i, cols in enumerate((((200, 30, 30), WHITE, (20, 40, 110)),
-                             ((40, 110, 200), (245, 200, 60), None),
-                             ((255, 255, 255), (20, 60, 160), (200, 30, 30)))):
-        fx = x + 16 + i * (w - 32) // 3
-        cv.vline(fx, y + 6, 30, (90, 70, 50))
-        cv.fill_rect(fx + 2, y + 6, 26, 8, cols[0])
-        if cols[1] is not None:
-            cv.fill_rect(fx + 2, y + 14, 26, 8, cols[1])
-        if cols[2] is not None:
-            cv.fill_rect(fx + 2, y + 22, 26, 8, cols[2])
-        else:
-            cv.fill_rect(fx + 2, y + 22, 26, 8, cols[0])
-    # "NO DEAL" stamp
-    cv.rect(x + w // 2 - 30, y + h - 24, 60, 16, RED, 2)
-    cv.text_center(x + w // 2 - 30, y + h - 21, 60, "NO DEAL", 1, RED)
+def scene_cpi(cv, x, y, w, h):
+    cv.fill_rect(x, y, w, h, (24, 44, 84))
+    # two bars: September 4.3% and October 4.9% (annual CPI, Australia)
+    base = y + h - 16
+    bh1 = int((h - 30) * 4.3 / 5.5)
+    bh2 = int((h - 30) * 4.9 / 5.5)
+    cv.fill_rect(x + 30, base - bh1, 56, bh1, (120, 180, 220))
+    cv.fill_rect(x + w - 86, base - bh2, 56, bh2, (245, 120, 90))
+    cv.fill_rect(x, base, w, 2, WHITE)
+    ttf_text_center(cv, x, y + 4, w, "4.9%", 16, (255, 150, 130))
+    ttf_text(cv, x + 30, base + 4, "SEP 4.3%", 10, WHITE)
+    ttf_text(cv, x + w - 86, base + 4, "OCT 4.9%", 10, WHITE)
 
 
-def scene_gavel(cv, x, y, w, h):
-    cv.fill_rect(x, y, w, h, (236, 228, 212))
-    # columns
-    for cx in (x + 12, x + w - 20):
-        cv.fill_rect(cx, y + 8, 8, h - 20, (180, 168, 140))
-        cv.fill_rect(cx - 2, y + 6, 12, 4, (150, 138, 110))
-        cv.fill_rect(cx - 2, y + h - 14, 12, 4, (150, 138, 110))
-    # gavel head + handle
-    cv.line(x + w // 2 - 22, y + 22, x + w // 2 + 18, y + 38, (90, 65, 40), 5)
-    cv.fill_rect(x + w // 2 - 26, y + 14, 16, 12, (120, 90, 60))
-    cv.fill_rect(x + w // 2 + 14, y + 32, 16, 12, (120, 90, 60))
-    # sound block
-    cv.fill_rect(x + w // 2 - 18, y + h - 26, 36, 10, (90, 65, 40))
-    cv.fill_rect(x + w // 2 - 22, y + h - 18, 44, 4, (120, 90, 60))
-    # verdict slip
-    cv.fill_rect(x + w // 2 - 14, y + h - 44, 28, 10, WHITE)
-    cv.rect(x + w // 2 - 14, y + h - 44, 28, 10, INK)
-    cv.text_center(x + w // 2 - 14, y + h - 42, 28, "10/12", 1, RED)
+def scene_expulsion(cv, x, y, w, h):
+    cv.fill_rect(x, y, w, h, (238, 228, 212))
+    # Swiss flag on a pole
+    cv.vline(x + 22, y + 8, h - 16, (90, 70, 50))
+    cv.fill_rect(x + 24, y + 8, 52, 34, (200, 30, 30))
+    cv.fill_rect(x + 42, y + 14, 16, 22, WHITE)
+    cv.fill_rect(x + 34, y + 20, 32, 10, WHITE)
+    # exit arrow pointing right
+    ax, ay = x + 96, y + h // 2 - 6
+    cv.fill_rect(ax, ay, 84, 12, RED)
+    cv.polygon([(ax + 84, ay - 10), (ax + 110, ay + 6), (ax + 84, ay + 22)],
+               RED)
+    # 48-hour deadline stamp
+    cv.rect(x + w - 58, y + h - 22, 48, 16, RED, 2)
+    ttf_text(cv, x + w - 52, y + h - 20, "48H", 11, RED)
 
 
 def scene_helicopter(cv, x, y, w, h):
@@ -605,99 +711,96 @@ def scene_chess(cv, x, y, w, h):
     cv.fill_rect(kx2 - 2, ky2 - 16, 4, 12, INK)
     cv.fill_rect(kx2 - 6, ky2 - 12, 12, 3, INK)
     cv.fill_rect(kx2 - 8, ky2 + 4, 16, 5, INK)
-    # clock
-    cv.fill_rect(x + w - 30, y + 6, 24, 12, WHITE)
-    cv.rect(x + w - 30, y + 6, 24, 12, INK)
-    cv.text(x + w - 28, y + 8, "0:03", 1, RED)
 
 
 # ---- the day's news: 42 stories, Wednesday-led ----
 # date: "25 NOV" (Wed), "24 NOV" (Tue), "23 NOV" (Mon). Tue/Mon items
 # are labelled with their day everywhere they appear.
-# Illustrated: (scene_fn, region, title, body, date)
+# Illustrated: (scene_fn, region, title, body, date). Titles carry the
+# map-marker number of the story. Bodies are notes for the reader; only
+# the title and the region/date tag are drawn on the panel.
 ILLUSTRATED = [
     (scene_rocket, "ASIA",
-     "SHENZHOU-24 TO TIANGONG",
-     "Pakistan's Zeeshan Ali, 40, is the first foreign astronaut to visit "
+     "1. SHENZHOU-24 TO TIANGONG",
+     "Pakistan's Zeeshan Ali, 40, is the first Pakistani astronaut to visit "
      "Tiangong. Launch 08:18, docking 11:56.",
      "25 NOV"),
     (scene_port, "MIDEAST",
-     "SAUDI STRIKES HODEIDAH PORT",
-     "Coalition says it hit the Houthi-run port after an evacuation "
-     "warning; Houthis threaten Saudi Red Sea ports.",
+     "2. COALITION STRIKES HODEIDAH PORT",
+     "Saudi-led coalition says it hit the Houthi-run port after an "
+     "evacuation warning; Houthis threaten Saudi Red Sea ports.",
      "25 NOV"),
     (scene_chart, "ASIA",
-     "CHIP ROUT HITS ASIA",
+     "3. CHIP ROUT HITS ASIA",
      "Taipei fell as much as 8.6% intraday, Seoul 6.4%, Nikkei 3.7%; "
-     "SoftBank -14% as the AI rally fades.",
+     "SoftBank -16% as the AI rally fades.",
      "25 NOV"),
     (scene_treaty, "OCEANIA",
-     "SOLOMONS PICK AUSTRALIA",
+     "4. SOLOMONS SIGN AUSTRALIA TREATY",
      "Canberra becomes the primary security partner; Honiara says no "
      "foreign military base. Fate of the 2022 China pact unconfirmed.",
      "25 NOV"),
-    (scene_talks, "MIDEAST",
-     "ABU DHABI TALKS FAIL",
-     "US-mediated Ukraine-Russia talks close without a breakthrough; "
-     "envoys head to Moscow and Dublin.",
-     "24 NOV"),
-    (scene_gavel, "AMERICAS",
-     "HUAWEI GUILTY 10 OF 12",
-     "US jury convicts on trade-secret theft, fraud and sanctions "
-     "charges; Huawei plans to appeal.",
-     "24 NOV"),
+    (scene_cpi, "OCEANIA",
+     "5. AUSTRALIA CPI JUMPS TO 4.9%",
+     "October annual inflation 4.9%, up from 4.3% in September; "
+     "trimmed mean 3.8%. Housing led the rise.",
+     "25 NOV"),
+    (scene_expulsion, "ASIA",
+     "6. NORTH KOREA EXPELS SWISS ENVOY",
+     "Pyongyang declares the head of Switzerland's new office persona "
+     "non grata; leave within 48 hours.",
+     "25 NOV"),
 ]
 
 STRIP = [
     (scene_helicopter, "ASIA",
-     "HELICOPTER CRASH",
-     "Turkish AS-532 Cougar down in training; five crew killed "
-     "in western Turkiye.",
-     "25 NOV"),
-    (scene_chess, "ASIA",
-     "GUKESH HOLDS ON",
-     "World chess title: Gukesh weathers time pressure to draw "
-     "with Sindarov.",
-     "25 NOV"),
+     "7. HELICOPTER CRASH",
+     "Turkish AS-532 Cougar down near Eskisehir; five killed.",
+     "24 NOV"),
+    (scene_chess, "EUROPE",
+     "10. GUKESH HOLDS ON",
+     "Gukesh draws game one in Geneva, 38 moves, 0.5-0.5.",
+     "24 NOV"),
 ]
 
-# Briefs: (region, title, date). Titles fit two lines at 14px in a
-# 194px cell (15 chars a line).
+# Briefs: (region, title, date). Titles wrap to at most two lines at
+# 15px in a 194px cell. Regions follow the event location. Titles that
+# match a numbered map marker carry its number.
 BRIEFS = [
-    ("OCEANIA", "AUSTRALIA CPI JUMPS TO 4.9%", "25 NOV"),
-    ("WORLD", "16 DAYS AGAINST ABUSE BEGIN", "25 NOV"),
+    ("OCEANIA", "16 DAYS AGAINST ABUSE", "25 NOV"),
+    ("WORLD", "47,000 KILLED BY PARTNERS IN 2025", "24 NOV"),
     ("OCEANIA", "NZ-EUROPOL BUST DARKNET RING", "25 NOV"),
-    ("ASIA", "BANGLADESH PAY RISE 36%", "25 NOV"),
+    ("ASIA", "GARMENT PAY RISE 36% TO TK17,000", "25 NOV"),
     ("ASIA", "JAPAN 40Y BOND SALE WEAK", "25 NOV"),
-    ("MIDEAST", "HAMAS SECURITY CHIEF KILLED", "25 NOV"),
-    ("EUROPE", "FRANCE SEIZES 3.3T OF METH", "25 NOV"),
-    ("EUROPE", "REAL MADRID ROUT PSV", "25 NOV"),
-    ("EUROPE", "SINNER MAY MISS AUSTRALIAN OPEN", "25 NOV"),
-    ("EUROPE", "ENGLAND LEVEL T20 SERIES", "25 NOV"),
-    ("AMERICAS", "SHEIN TO PAY $100M TO FTC", "25 NOV"),
-    ("AMERICAS", "SOLDIER ADMITS SELLING SECRETS", "25 NOV"),
-    ("WORLD", "5 WOMEN KILLED EVERY HOUR", "25 NOV"),
-    ("WORLD", "UN CHIEF URGES AI SAFETY TALKS", "25 NOV"),
-    ("EUROPE", "SPAIN VOTES ON SUNDAY", "25 NOV"),
+    ("MIDEAST", "ISRAEL KILLS HAMAS SECURITY CHIEF", "24 NOV"),
+    ("ASIA", "MALAYSIA AIR ORDERS 10 DREAMLINERS", "25 NOV"),
+    ("EUROPE", "8. REAL MADRID ROUT PSV 5-1", "24 NOV"),
+    ("EUROPE", "SINNER MAY MISS AUSTRALIAN OPEN", "24 NOV"),
+    ("OCEANIA", "ENGLAND BEAT AUSTRALIA BY 8 WKTS", "24 NOV"),
+    ("AMERICAS", "SHEIN $100M FTC REDRESS PROPOSED", "24 NOV"),
+    ("AMERICAS", "ARMY SERGEANT PLEADS GUILTY", "23 NOV"),
+    ("AMERICAS", "UN CHIEF URGES AI SAFETY TALKS", "23 NOV"),
+    ("EUROPE", "SPAIN VOTES SUNDAY", "29 NOV"),
     ("EUROPE", "MET 'STILL RACIST': REPORT", "25 NOV"),
-    ("AFRICA", "RSF SPY CHIEF DEFECTS TO ARMY", "25 NOV"),
-    ("AFRICA", "17 KILLED IN SA MASS SHOOTINGS", "25 NOV"),
-    ("AFRICA", "BORNO SCHOOL ROLLS DOUBLE", "25 NOV"),
-    ("OCEANIA", "EL NINO DROUGHT RESPONSE GROWS", "25 NOV"),
-    ("ASIA", "HANOI GAS BLAST KILLS SIX", "25 NOV"),
-    ("ASIA", "BJP AND AKALI DAL REUNITE", "25 NOV"),
-    ("ASIA", "CHEN JINING UNDER PROBE", "24 NOV"),
-    ("AMERICAS", "30 HELD HOSTAGE IN CARTAGENA", "24 NOV"),
-    ("AMERICAS", "US CONFIDENCE JUMPS TO 103", "24 NOV"),
+    ("AFRICA", "RSF SPY CHIEF 'DEFECTS'", "24 NOV"),
+    ("AFRICA", "11. BORNO SCHOOL ROLLS NEARLY DOUBLE", "24 NOV"),
+    ("OCEANIA", "FIJI DROUGHT: 92 WITHOUT WATER", "24 NOV"),
+    ("ASIA", "HANOI GAS BLAST KILLS SIX", "24 NOV"),
+    ("ASIA", "BJP AND AKALI DAL REUNITE", "24 NOV"),
+    ("ASIA", "SHANGHAI CHIEF CHEN UNDER PROBE", "24 NOV"),
+    ("AMERICAS", "9. 30 HELD HOSTAGE IN CARTAGENA", "24 NOV"),
+    ("AMERICAS", "US CONSUMER CONFIDENCE 103.3", "24 NOV"),
     ("ASIA", "CHINA EXTENDS MINERALS PAUSE", "24 NOV"),
     ("ASIA", "RUSSIAN JETS IN KOREAN ADIZ", "24 NOV"),
     ("EUROPE", "ZELENSKY MEETS MAGYAR", "24 NOV"),
-    ("EUROPE", "SARKOZYS TO STAND TRIAL", "24 NOV"),
-    ("AFRICA", "WHO PULLS EBOLA STAFF FROM AKWE", "24 NOV"),
-    ("AMERICAS", "BRAZIL PASSES FISCAL PACKAGE", "23 NOV"),
-    ("AMERICAS", "VENEZUELA DEBT $237.5BN", "23 NOV"),
-    ("MIDEAST", "QATAR RESTARTS IRAN MEDIATION", "23 NOV"),
+    ("EUROPE", "SARKOZY & BRUNI TO FACE TRIAL", "24 NOV"),
+    ("AFRICA", "WHO EVACUATES AKWE HOSPITAL", "24 NOV"),
+    ("AMERICAS", "LULA SIGNS FISCAL PACKAGE", "24 NOV"),
+    ("AMERICAS", "VENEZUELA DEBT $237.5BN", "24 NOV"),
+    ("MIDEAST", "QATAR PUSHES US-IRAN TALKS", "23 NOV"),
     ("ASIA", "XIAMEN AIR TO BUY 50 BOEINGS", "24 NOV"),
+    ("AMERICAS", "HUAWEI GUILTY 10 OF 12", "24 NOV"),
+    ("EUROPE", "KREMLIN: NO DATE FOR NEXT TALKS", "24 NOV"),
 ]
 
 
@@ -705,14 +808,28 @@ def draw_illustrated(cv, x, y, w, h, scene, region, title, body, date):
     cv.fill_rect(x, y, w, h, CARD)
     cv.rect(x, y, w, h, LINE)
     scene(cv, x + 4, y + 4, w - 8, 68)
-    lines = wrap_text(title, 13)
+    # title: largest size that still fits two lines. The pixel-font
+    # fallback is wider per glyph, so it uses the full panel width and
+    # a fixed 16px line pitch at scale 2.
+    if USE_TTF:
+        cand_sizes, max_w, pitch = (19, 17, 15), w - 16, None
+    else:
+        cand_sizes, max_w, pitch = (14,), w - 8, 16
+    size = cand_sizes[-1]
+    for cand in cand_sizes:
+        lines = ttf_wrap(title, cand, max_w)
+        if len(lines) <= 2:
+            size, lines = cand, lines
+            break
+    else:
+        lines = ttf_wrap(title, size, max_w)
     ty = y + 78
     for ln in lines[:2]:
-        cv.text(x + 8, ty, ln, 3, INK)
-        ty += 21
-    cv.text(x + 8, y + h - 13, region, 1, REGION_COLORS[region])
-    dx = x + 8 + text_width(region, 1) + 6
-    cv.text(dx, y + h - 13, "- " + date, 1, RED)
+        ttf_text(cv, x + 8, ty, ln, size, INK)
+        ty += size + 4 if pitch is None else pitch
+    ttf_text(cv, x + 8, y + h - 14, region, 11, REGION_COLORS[region])
+    dx = x + 8 + ttf_width(region, 11) + 6
+    ttf_text(cv, dx, y + h - 14, "- " + date, 11, RED)
     # body goes in the strip panels only; side panels carry title + tag
 
 
@@ -721,39 +838,59 @@ def draw_strip(cv, x, y, w, h, scene, region, title, body, date):
     cv.rect(x, y, w, h, LINE)
     scene(cv, x + 4, y + 6, 120, h - 12)
     tx = x + 132
-    cv.text(tx, y + 10, title, 3, INK)
-    lines = wrap_text(body, 58)
+    ttf_text(cv, tx, y + 10, title, 20, INK)
+    lines = ttf_wrap(body, 12, w - 140, bold=False)
     by = y + 38
     for ln in lines[:2]:
-        cv.text(tx, by, ln, 1, (64, 76, 100))
-        by += 9
-    cv.text(tx, y + h - 14, region, 1, REGION_COLORS[region])
-    dx = tx + text_width(region, 1) + 6
-    cv.text(dx, y + h - 14, "- " + date, 1, RED)
+        ttf_text(cv, tx, by, ln, 12, (64, 76, 100), bold=False)
+        by += 15
+    ttf_text(cv, tx, y + h - 15, region, 11, REGION_COLORS[region])
+    dx = tx + ttf_width(region, 11) + 6
+    ttf_text(cv, dx, y + h - 15, "- " + date, 11, RED)
 
 
 def draw_brief(cv, x, y, w, h, region, title, date):
     cv.fill_rect(x, y, w, h, CARD)
     cv.rect(x, y, w, h, LINE)
     cv.fill_rect(x, y, 3, h, REGION_COLORS[region])
-    cv.text(x + 8, y + 3, region, 1, REGION_COLORS[region])
-    dx = x + 8 + text_width(region, 1) + 6
-    cv.text(dx, y + 3, "- " + date, 1, RED)
-    lines = wrap_text(title, 15)
-    ty = y + 13
+    ttf_text(cv, x + 8, y + 3, region, 10, REGION_COLORS[region])
+    dx = x + 8 + ttf_width(region, 10) + 6
+    ttf_text(cv, dx, y + 3, "- " + date, 10, RED)
+    # title: largest size that still fits two lines (10px is the
+    # pixel-font escape hatch: a long title that needs three lines at
+    # scale 2 renders complete, if smaller, at scale 1)
+    size = 10
+    for cand in (15, 14, 13):
+        lines = ttf_wrap(title, cand, w - 16)
+        if len(lines) <= 2:
+            size, lines = cand, lines
+            break
+    else:
+        lines = ttf_wrap(title, size, w - 16)
+    ty = y + 15
     for ln in lines[:2]:
-        cv.text(x + 8, ty, ln, 2, INK)
-        ty += 14
+        ttf_text(cv, x + 8, ty, ln, size, INK)
+        ty += size + 3
+
+
+def draw_key_cell(cv, x, y, w, h):
+    """Compact date key in the one empty brief cell (bottom right)."""
+    cv.fill_rect(x, y, w, h, NAVY)
+    cv.rect(x, y, w, h, LINE)
+    cv.text(x + 8, y + 4, "DATE KEY", 1, WHITE)
+    cv.text(x + 8, y + 13, "24 NOV = TUESDAY", 1, (214, 222, 236))
+    cv.text(x + 8, y + 22, "23 NOV = MONDAY", 1, (214, 222, 236))
+    cv.text(x + 8, y + 31, "29 NOV = VOTE DAY", 1, (214, 222, 236))
 
 
 def build():
     cv = Canvas(W, H, PAPER)
     # ---- masthead: 92px ----
     cv.fill_rect(0, 0, W, 92, NAVY)
-    cv.text_center(0, 12, W, "THE WORLD IN ONE IMAGE", 6, WHITE)
-    cv.text_center(0, 62, W,
-                   "WEDNESDAY 25 NOVEMBER 2026 - 42 STORIES - 7 REGIONS",
-                   2, (214, 222, 236))
+    ttf_text_center(cv, 0, 10, W, "THE WORLD IN ONE IMAGE", 40, WHITE)
+    ttf_text_center(cv, 0, 60, W,
+                    "WEDNESDAY 25 NOVEMBER 2026 - 42 STORIES - 7 NEWS REGIONS",
+                    15, (214, 222, 236))
     cv.fill_rect(0, 88, W, 4, RED)
 
     # ---- map band: 92-522 (430px) ----
@@ -769,13 +906,15 @@ def build():
     # central world map
     mx, my, mw, mh = 272, 100, 480, 290
     draw_map(cv, mx, my, mw, mh)
-    cv.text_center(mx, 396, mw,
-                   "1 JIUQUAN - 2 HODEIDAH - 3 TAIPEI - 4 HONIARA - 5 ABU DHABI",
-                   1, INK)
-    cv.text_center(mx, 408, mw,
-                   "6 NEW YORK - 7 TURKIYE - 8 MADRID - 9 CARTAGENA - 10 CANBERRA",
-                   1, INK)
-    # stories by region: horizontal bars
+    ttf_text_center(cv, mx, 396, mw,
+                    "1 JIUQUAN - 2 HODEIDAH - 3 TAIPEI - 4 HONIARA - "
+                    "5 CANBERRA - 6 PYONGYANG",
+                    10, INK)
+    ttf_text_center(cv, mx, 410, mw,
+                    "7 ESKISEHIR - 8 MADRID - 9 CARTAGENA - 10 GENEVA - "
+                    "11 BORNO",
+                    10, INK)
+    # stories by region: horizontal bars (counts recomputed from the data)
     counts = {}
     for _s, region, _t, _b, _d in ILLUSTRATED:
         counts[region] = counts.get(region, 0) + 1
@@ -784,14 +923,15 @@ def build():
     for region, _t, _d in BRIEFS:
         counts[region] = counts.get(region, 0) + 1
     order = ["ASIA", "MIDEAST", "EUROPE", "AFRICA", "AMERICAS", "OCEANIA", "WORLD"]
-    cv.text(mx, 422, "STORIES BY REGION", 1, INK)
+    max_n = max(counts.values())
+    ttf_text(cv, mx, 424, "STORIES BY REGION", 10, INK)
     for i, region in enumerate(order):
-        ry = 434 + i * 12
-        cv.text(mx, ry, region, 1, REGION_COLORS[region])
+        ry = 440 + i * 12
+        ttf_text(cv, mx, ry, region, 10, REGION_COLORS[region])
         n = counts.get(region, 0)
-        bw = int(n / 12 * 260)
-        cv.fill_rect(mx + 62, ry + 1, bw, 5, REGION_COLORS[region])
-        cv.text(mx + 62 + bw + 6, ry, str(n), 1, INK)
+        bw = int(n / max_n * 260)
+        cv.fill_rect(mx + 62, ry + 2, bw, 5, REGION_COLORS[region])
+        ttf_text(cv, mx + 62 + bw + 6, ry, str(n), 10, INK)
 
     # ---- strip band: 522-616 (94px), 2 more illustrations ----
     for i, item in enumerate(STRIP):
@@ -800,8 +940,8 @@ def build():
         draw_strip(cv, sx, 522, 494, 94, scene, region, title, body, date)
 
     # ---- briefs band: 616-986 (370px), 34 stories ----
-    cv.text(12, 620, "THE DAY IN BRIEF - 34 STORIES", 2, INK)
-    cv.fill_rect(12, 638 - 4, W - 24, 2, RED)
+    ttf_text(cv, 12, 618, "THE DAY IN BRIEF - 34 STORIES", 16, INK)
+    cv.fill_rect(12, 636, W - 24, 2, RED)
     cols, rows = 5, 7
     cell_w, cell_h, gap = 194, 46, 4
     for idx, (region, title, date) in enumerate(BRIEFS):
@@ -809,17 +949,22 @@ def build():
         bx = 12 + c * (cell_w + 8)
         by = 638 + r * (cell_h + gap)
         draw_brief(cv, bx, by, cell_w, cell_h, region, title, date)
+    # the 35th cell (bottom right) is empty: use it for the date key
+    kx = 12 + 4 * (cell_w + 8)
+    ky = 638 + 6 * (cell_h + gap)
+    draw_key_cell(cv, kx, ky, cell_w, cell_h)
 
     # ---- footnote: 986-1024 (38px) ----
-    cv.text_center(
-        0, 990, W,
-        "Sources: Reuters, AP, AFP, Al Jazeera, SCMP, Nature, UN News, Xinhua.",
-        1, (90, 96, 110))
-    cv.text_center(
-        0, 1002, W,
-        "Stories dated 25 Nov 2026 unless marked 24 NOV (Tue) or 23 NOV (Mon). "
-        "Market moves are intraday, not closes.",
-        1, (90, 96, 110))
+    ttf_text_center(
+        cv, 0, 990, W,
+        "Sources: Reuters, AP, AFP, Al Jazeera, SCMP, UN News, Xinhua, "
+        "FIDE, FTC, ABS, NZ Police, Conference Board.",
+        11, (90, 96, 110), bold=False)
+    ttf_text_center(
+        cv, 0, 1004, W,
+        "Stories dated 25 Nov 2026 unless marked 24 NOV (Tue), 23 NOV (Mon) "
+        "or 29 NOV (election date). Market moves are intraday, not closes.",
+        11, (90, 96, 110), bold=False)
     return cv
 
 
